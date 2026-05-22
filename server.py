@@ -969,9 +969,182 @@ def get_river_discharge(
 
 
 # ============================================================
+# TOOL 21: Agriculture Market News (DuckDuckGo)
+# ============================================================
+
+# Region mapping: lat/lon bounding boxes to DuckDuckGo region codes and country names
+_REGION_MAP = [
+    {"name": "India", "region": "in-en", "lat_min": 6.0, "lat_max": 36.0, "lon_min": 68.0, "lon_max": 97.5},
+    {"name": "United States", "region": "us-en", "lat_min": 24.0, "lat_max": 50.0, "lon_min": -125.0, "lon_max": -66.0},
+    {"name": "Brazil", "region": "br-pt", "lat_min": -34.0, "lat_max": 5.5, "lon_min": -74.0, "lon_max": -35.0},
+    {"name": "China", "region": "cn-zh", "lat_min": 18.0, "lat_max": 54.0, "lon_min": 73.0, "lon_max": 135.0},
+    {"name": "Australia", "region": "au-en", "lat_min": -44.0, "lat_max": -10.0, "lon_min": 113.0, "lon_max": 154.0},
+    {"name": "United Kingdom", "region": "uk-en", "lat_min": 49.0, "lat_max": 61.0, "lon_min": -8.0, "lon_max": 2.0},
+    {"name": "Canada", "region": "ca-en", "lat_min": 42.0, "lat_max": 84.0, "lon_min": -141.0, "lon_max": -52.0},
+    {"name": "Germany", "region": "de-de", "lat_min": 47.0, "lat_max": 55.0, "lon_min": 5.5, "lon_max": 15.5},
+    {"name": "France", "region": "fr-fr", "lat_min": 41.0, "lat_max": 51.5, "lon_min": -5.5, "lon_max": 10.0},
+    {"name": "Nigeria", "region": "ng-en", "lat_min": 4.0, "lat_max": 14.0, "lon_min": 2.5, "lon_max": 15.0},
+    {"name": "Kenya", "region": "ke-en", "lat_min": -5.0, "lat_max": 5.0, "lon_min": 33.5, "lon_max": 42.0},
+    {"name": "Indonesia", "region": "id-en", "lat_min": -11.0, "lat_max": 6.0, "lon_min": 95.0, "lon_max": 141.0},
+    {"name": "Pakistan", "region": "pk-en", "lat_min": 23.5, "lat_max": 37.0, "lon_min": 60.5, "lon_max": 77.5},
+    {"name": "Bangladesh", "region": "bd-en", "lat_min": 20.5, "lat_max": 26.5, "lon_min": 88.0, "lon_max": 92.5},
+    {"name": "Thailand", "region": "th-en", "lat_min": 5.5, "lat_max": 20.5, "lon_min": 97.5, "lon_max": 105.5},
+    {"name": "Argentina", "region": "ar-es", "lat_min": -55.0, "lat_max": -21.5, "lon_min": -73.5, "lon_max": -53.5},
+    {"name": "South Africa", "region": "za-en", "lat_min": -35.0, "lat_max": -22.0, "lon_min": 16.5, "lon_max": 33.0},
+    {"name": "Russia", "region": "ru-ru", "lat_min": 41.0, "lat_max": 82.0, "lon_min": 19.0, "lon_max": 180.0},
+    {"name": "Mexico", "region": "mx-es", "lat_min": 14.5, "lat_max": 33.0, "lon_min": -118.5, "lon_max": -86.5},
+    {"name": "Japan", "region": "jp-jp", "lat_min": 24.0, "lat_max": 46.0, "lon_min": 122.5, "lon_max": 154.0},
+]
+
+
+def _detect_region(latitude: Optional[float], longitude: Optional[float]) -> tuple:
+    """Detect country name and DuckDuckGo region code from coordinates."""
+    if latitude is None or longitude is None:
+        return "Global", "wt-wt"
+    for r in _REGION_MAP:
+        if r["lat_min"] <= latitude <= r["lat_max"] and r["lon_min"] <= longitude <= r["lon_max"]:
+            return r["name"], r["region"]
+    return "Global", "wt-wt"
+
+
+@mcp.tool
+def get_agriculture_market_news(
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    crop: Optional[str] = None,
+    max_results: int = 10
+) -> str:
+    """
+    Get latest agriculture market news and crop price updates. Uses location to tailor results
+    to the user's country (e.g., Indian mandi prices for India, USDA reports for USA).
+    If no latitude/longitude is provided, returns global agriculture news.
+
+    Args:
+        latitude (float, optional): Latitude of the user's location for region-specific news.
+        longitude (float, optional): Longitude of the user's location for region-specific news.
+        crop (str, optional): Specific crop to search for (e.g., "wheat", "rice", "soybean"). If not provided, general agriculture market news is returned.
+        max_results (int): Maximum number of news articles to return (default 10, max 25).
+    """
+    from ddgs import DDGS
+
+    if max_results < 1:
+        max_results = 1
+    if max_results > 25:
+        max_results = 25
+
+    country_name, ddg_region = _detect_region(latitude, longitude)
+
+    # Build search queries tailored to the detected region
+    if crop:
+        news_query = f"{crop} agriculture market price news {country_name}" if country_name != "Global" else f"{crop} agriculture market price news"
+        price_query = f"{crop} crop price today {country_name}" if country_name != "Global" else f"{crop} crop price today global market"
+    else:
+        news_query = f"agriculture market news crop prices {country_name}" if country_name != "Global" else "agriculture market news crop prices"
+        price_query = f"agriculture commodity prices today {country_name}" if country_name != "Global" else "agriculture commodity prices today global"
+
+    logger.info(f"Querying agriculture market news for region={country_name} ({ddg_region}), crop={crop or 'all'}...")
+
+    news_articles = []
+    price_results = []
+
+    try:
+        with DDGS() as ddgs:
+            # 1. News search for latest agriculture market news
+            try:
+                raw_news = ddgs.news(
+                    news_query,
+                    region=ddg_region,
+                    timelimit="w",
+                    max_results=max_results
+                )
+                if raw_news:
+                    for article in raw_news:
+                        news_articles.append({
+                            "title": article.get("title", ""),
+                            "body": article.get("body", ""),
+                            "url": article.get("url", ""),
+                            "source": article.get("source", ""),
+                            "date": article.get("date", ""),
+                            "image": article.get("image", "")
+                        })
+            except Exception as e:
+                logger.warning(f"DuckDuckGo news search failed (returning partial results): {str(e)}")
+
+            # 2. Text search for crop prices
+            try:
+                raw_prices = ddgs.text(
+                    price_query,
+                    region=ddg_region,
+                    timelimit="w",
+                    max_results=min(max_results, 5)
+                )
+                if raw_prices:
+                    for item in raw_prices:
+                        price_results.append({
+                            "title": item.get("title", ""),
+                            "body": item.get("body", ""),
+                            "url": item.get("href", ""),
+                        })
+            except Exception as e:
+                logger.warning(f"DuckDuckGo price search failed (returning partial results): {str(e)}")
+
+    except Exception as e:
+        logger.error(f"DuckDuckGo search failed: {str(e)}")
+        return json.dumps({"error": f"Failed to fetch agriculture market news: {str(e)}"})
+
+    output_lines = [f"# Agriculture Market News & Crop Prices: {country_name}"]
+    
+    if crop:
+        output_lines.append(f"**Focus Crop:** {crop.capitalize()}\n")
+    else:
+        output_lines.append("**Focus:** General Agriculture Market\n")
+
+    if news_articles:
+        output_lines.append("## 📰 Latest News Articles")
+        for idx, article in enumerate(news_articles, 1):
+            title = article.get("title", "No Title")
+            source = article.get("source", "Unknown Source")
+            date = article.get("date", "")
+            body = article.get("body", "")
+            url = article.get("url", "")
+            
+            date_str = f" - {date}" if date else ""
+            output_lines.append(f"### {idx}. {title}")
+            output_lines.append(f"**Source:** {source}{date_str}")
+            if body:
+                output_lines.append(f"> {body}")
+            if url:
+                output_lines.append(f"[Read full article]({url})\n")
+            else:
+                output_lines.append("\n")
+    else:
+        output_lines.append("## 📰 Latest News Articles\n*No recent news articles found for this query.*\n")
+
+    if price_results:
+        output_lines.append("## 💰 Crop Price Market Insights")
+        for idx, item in enumerate(price_results, 1):
+            title = item.get("title", "No Title")
+            body = item.get("body", "")
+            url = item.get("url", "")
+            
+            output_lines.append(f"### {idx}. {title}")
+            if body:
+                output_lines.append(f"{body}")
+            if url:
+                output_lines.append(f"[Source link]({url})\n")
+            else:
+                output_lines.append("\n")
+    else:
+        output_lines.append("## 💰 Crop Price Market Insights\n*No recent price insights found for this query.*\n")
+
+    return "\n".join(output_lines)
+
+
+# ============================================================
 # SERVER ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
     logger.info("Starting AgroConnectMCP Server...")
     mcp.run()
+
