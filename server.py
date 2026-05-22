@@ -915,6 +915,60 @@ def get_historical_weather(
 
 
 # ============================================================
+# TOOL 20: River Discharge / Flood Forecast
+# ============================================================
+
+@mcp.tool
+def get_river_discharge(
+    latitude: float,
+    longitude: float
+) -> str:
+    """
+    Get daily river discharge forecast data for flood risk assessment using the Open-Meteo Flood API.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+    """
+    url = "https://flood-api.open-meteo.com/v1/flood"
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "daily": "river_discharge",
+    }
+
+    logger.info(f"Querying river discharge for ({latitude}, {longitude})...")
+    try:
+        responses = openmeteo.weather_api(url, params=params)
+        response = responses[0]
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch flood data: {str(e)}"})
+
+    daily = response.Daily()
+    daily_data = {
+        "date": pd.date_range(
+            start=pd.to_datetime(daily.Time(), unit="s", utc=True),
+            end=pd.to_datetime(daily.TimeEnd(), unit="s", utc=True),
+            freq=pd.Timedelta(seconds=daily.Interval()),
+            inclusive="left"
+        )
+    }
+    daily_data["river_discharge"] = daily.Variables(0).ValuesAsNumpy()
+
+    df = pd.DataFrame(data=daily_data)
+    result = {
+        "location": {
+            "latitude": float(response.Latitude()),
+            "longitude": float(response.Longitude()),
+            "elevation": float(response.Elevation()),
+            "utc_offset_seconds": int(response.UtcOffsetSeconds())
+        },
+        "river_discharge_daily": json.loads(df.to_json(orient="records", date_format="iso"))
+    }
+    return json.dumps(result, cls=DateTimeEncoder)
+
+
+# ============================================================
 # SERVER ENTRY POINT
 # ============================================================
 
