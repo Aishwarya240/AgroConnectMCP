@@ -2,6 +2,9 @@ import os
 import base64
 import mimetypes
 import logging
+import json
+import datetime
+import math
 from typing import Optional
 import requests
 from dotenv import load_dotenv
@@ -27,6 +30,105 @@ openmeteo = openmeteo_requests.Client(session=retry_session)
 mcp = FastMCP("AgroConnectMCP")
 
 
+# --- JSON ENCODER ---
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if isinstance(obj, float):
+            if math.isnan(obj):
+                return None
+        return super(DateTimeEncoder, self).default(obj)
+
+
+# --- HELPER: Open-Meteo hourly query ---
+
+def _query_hourly(latitude: float, longitude: float, variables: list, forecast_days: int = 7) -> dict:
+    """Internal helper to query Open-Meteo hourly endpoint and return location + DataFrame."""
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "hourly": variables,
+        "timezone": "auto",
+        "forecast_days": forecast_days
+    }
+    responses = openmeteo.weather_api(url, params=params)
+    response = responses[0]
+
+    hourly = response.Hourly()
+    hourly_data = {
+        "date": pd.date_range(
+            start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+            end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+            freq=pd.Timedelta(seconds=hourly.Interval()),
+            inclusive="left"
+        )
+    }
+    for idx, var_name in enumerate(variables):
+        hourly_data[var_name] = hourly.Variables(idx).ValuesAsNumpy()
+
+    df = pd.DataFrame(data=hourly_data)
+    location = {
+        "latitude": float(response.Latitude()),
+        "longitude": float(response.Longitude()),
+        "elevation": float(response.Elevation()),
+        "utc_offset_seconds": int(response.UtcOffsetSeconds())
+    }
+    return {"location": location, "df": df}
+
+
+def _query_daily(latitude: float, longitude: float, variables: list, forecast_days: int = 7, int64_vars: list = None) -> dict:
+    """Internal helper to query Open-Meteo daily endpoint and return location + DataFrame."""
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "daily": variables,
+        "timezone": "auto",
+        "forecast_days": forecast_days
+    }
+    responses = openmeteo.weather_api(url, params=params)
+    response = responses[0]
+
+    daily = response.Daily()
+    daily_data = {
+        "date": pd.date_range(
+            start=pd.to_datetime(daily.Time(), unit="s", utc=True),
+            end=pd.to_datetime(daily.TimeEnd(), unit="s", utc=True),
+            freq=pd.Timedelta(seconds=daily.Interval()),
+            inclusive="left"
+        )
+    }
+    int64_vars = int64_vars or []
+    for idx, var_name in enumerate(variables):
+        if var_name in int64_vars:
+            daily_data[var_name] = pd.to_datetime(daily.Variables(idx).ValuesInt64AsNumpy(), unit="s", utc=True)
+        else:
+            daily_data[var_name] = daily.Variables(idx).ValuesAsNumpy()
+
+    df = pd.DataFrame(data=daily_data)
+    location = {
+        "latitude": float(response.Latitude()),
+        "longitude": float(response.Longitude()),
+        "elevation": float(response.Elevation()),
+        "utc_offset_seconds": int(response.UtcOffsetSeconds())
+    }
+    return {"location": location, "df": df}
+
+
+def _format_result(location: dict, key: str, df: pd.DataFrame) -> str:
+    """Format location + DataFrame into a JSON string."""
+    result = {
+        "location": location,
+        key: json.loads(df.to_json(orient="records", date_format="iso"))
+    }
+    return json.dumps(result, cls=DateTimeEncoder)
+
+
+# --- HELPER: Image processing ---
+
 def get_base64_image(image_data: str) -> str:
     """
     Helper function to normalize and convert the input image_data to a base64 Data URI.
@@ -36,11 +138,9 @@ def get_base64_image(image_data: str) -> str:
     - Local file path
     - Remote URL (starts with 'http://' or 'https://')
     """
-    # 1. Check if it's already a Data URI
     if image_data.strip().startswith("data:image/"):
         return image_data.strip()
 
-    # 2. Check if it's a remote URL
     if image_data.strip().startswith(("http://", "https://")):
         logger.info(f"Downloading image from URL: {image_data}")
         try:
@@ -52,37 +152,35 @@ def get_base64_image(image_data: str) -> str:
         except Exception as e:
             raise ValueError(f"Failed to fetch image from URL '{image_data}': {str(e)}")
 
-    # 3. Check if it's a local file path
     if os.path.exists(image_data):
         logger.info(f"Reading image from local path: {image_data}")
         try:
             mime_type, _ = mimetypes.guess_type(image_data)
             if not mime_type or not mime_type.startswith("image/"):
-                mime_type = "image/jpeg"  # Default fallback
-            
+                mime_type = "image/jpeg"
             with open(image_data, "rb") as image_file:
                 encoded_str = base64.b64encode(image_file.read()).decode("utf-8")
                 return f"data:{mime_type};base64,{encoded_str}"
         except Exception as e:
             raise ValueError(f"Failed to read local image file '{image_data}': {str(e)}")
 
-    # 4. Assume it's a raw base64 string
-    # Validate raw base64 encoding to make sure it's valid
     try:
-        # Strip potential whitespace
         cleaned = image_data.strip()
-        # Add padding if missing (often a case with raw base64 strings)
         padding_needed = len(cleaned) % 4
         if padding_needed:
             cleaned += "=" * (4 - padding_needed)
         base64.b64decode(cleaned)
-        # Standard fallback is jpeg mime-type
         return f"data:image/jpeg;base64,{cleaned}"
     except Exception:
         raise ValueError(
             "Invalid image input. The input must be a valid file path, "
             "an http/https image URL, a base64 Data URI, or a raw base64 string."
         )
+
+
+# ============================================================
+# TOOL 1: Plant Disease Prediction
+# ============================================================
 
 @mcp.tool
 def predict_plant_disease(
@@ -102,7 +200,6 @@ def predict_plant_disease(
         latitude (float, optional): Latitude coordinates of the crop's location for better geo-diagnosis.
         longitude (float, optional): Longitude coordinates of the crop's location for better geo-diagnosis.
     """
-    # 1. Fetch API Key
     api_key = os.getenv("KINDWISE_API_KEY")
     if not api_key:
         return (
@@ -110,40 +207,33 @@ def predict_plant_disease(
             "Please check that your .env file is present and properly set up."
         )
 
-    # 2. Get normalized base64 image data
     try:
         formatted_image = get_base64_image(image_data)
     except ValueError as e:
         return f"Error processing image input: {str(e)}"
 
-    # 3. Build request payload
     url = "https://crop.kindwise.com/api/v1/identification"
     headers = {
         "Api-Key": api_key,
         "Content-Type": "application/json"
     }
-    
     payload = {
         "images": [formatted_image],
         "similar_images": True
     }
-    
     if latitude is not None:
         payload["latitude"] = latitude
     if longitude is not None:
         payload["longitude"] = longitude
 
-    # 4. Make Request
     logger.info("Sending request to Kindwise crop.health API...")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
-        # Handle HTTP errors
         if response.status_code == 401:
             return "Error: Unauthorized. The configured KINDWISE_API_KEY is invalid or inactive."
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"HTTP Request failed: {str(e)}")
-        # Check if we have error details from the server
         try:
             err_json = response.json()
             err_msg = err_json.get("message") or err_json.get("error", {}).get("message")
@@ -153,30 +243,25 @@ def predict_plant_disease(
             pass
         return f"Failed to connect to the Crop Disease Prediction API: {str(e)}"
 
-    # 5. Parse Response
     try:
         data = response.json()
     except Exception as e:
         return f"Failed to parse response from Crop API: {str(e)}"
 
-    # 6. Format Output
     output_lines = ["# AgroConnectMCP Plant Disease Assessment Report\n"]
-    
-    # Check general properties
     is_plant = data.get("is_plant")
     if is_plant is False:
         output_lines.append("> [!WARNING]\n> The Crop API did not detect a plant in this image. Results may not be accurate.\n")
-    
+
     result = data.get("result", {})
     disease_info = result.get("disease", {})
     suggestions = disease_info.get("suggestions", [])
-    
+
     if not suggestions:
         output_lines.append("No specific plant diseases or pests were identified. The plant might be healthy, or the image quality was insufficient for diagnosis.")
         return "\n".join(output_lines)
-    
+
     output_lines.append("## Identified Condition Suggestions\n")
-    
     for idx, sug in enumerate(suggestions, 1):
         name = sug.get("name", "Unknown Condition")
         prob = sug.get("probability", 0.0)
@@ -186,26 +271,20 @@ def predict_plant_disease(
         treatment = details.get("treatment", {})
         severity = details.get("severity", "Unknown")
         symptoms = details.get("symptoms", [])
-        
+
         output_lines.append(f"### {idx}. {name}")
         output_lines.append(f"- **Confidence/Probability**: {prob * 100:.1f}%")
         output_lines.append(f"- **Severity Level**: {severity.capitalize()}")
         if common_names:
             output_lines.append(f"- **Common Names**: {', '.join(common_names)}")
-        
         output_lines.append(f"\n#### Description\n{description}\n")
-        
-        # Symptoms formatting
         if symptoms:
             output_lines.append("#### Key Symptoms")
             for sym in symptoms:
                 output_lines.append(f"- {sym}")
             output_lines.append("")
-            
-        # Treatment recommendations
         if treatment:
             output_lines.append("#### Recommended Treatment & Prevention Options")
-            # treatment can be a string, a list, or a dict containing biological, chemical, prevention etc.
             if isinstance(treatment, dict):
                 for category, recommendations in treatment.items():
                     if recommendations:
@@ -222,19 +301,76 @@ def predict_plant_disease(
             else:
                 output_lines.append(f"{treatment}")
             output_lines.append("")
-            
         output_lines.append("---\n")
-        
+
     return "\n".join(output_lines)
 
+
+# ============================================================
+# TOOL 2: Current Weather
+# ============================================================
+
 @mcp.tool
-def get_weather_forecast(
+def get_current_weather(
+    latitude: float,
+    longitude: float
+) -> str:
+    """
+    Get current weather conditions including temperature, humidity, rain, pressure, wind speed and direction.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": ["temperature_2m", "relative_humidity_2m", "rain", "is_day", "pressure_msl", "wind_speed_10m", "wind_direction_10m"],
+        "timezone": "auto"
+    }
+
+    logger.info(f"Querying current weather for ({latitude}, {longitude})...")
+    try:
+        responses = openmeteo.weather_api(url, params=params)
+        response = responses[0]
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    current = response.Current()
+    result = {
+        "location": {
+            "latitude": float(response.Latitude()),
+            "longitude": float(response.Longitude()),
+            "elevation": float(response.Elevation()),
+            "utc_offset_seconds": int(response.UtcOffsetSeconds())
+        },
+        "current": {
+            "time": pd.to_datetime(current.Time(), unit="s", utc=True).isoformat(),
+            "temperature_2m": float(current.Variables(0).Value()),
+            "relative_humidity_2m": float(current.Variables(1).Value()),
+            "rain": float(current.Variables(2).Value()),
+            "is_day": float(current.Variables(3).Value()),
+            "pressure_msl": float(current.Variables(4).Value()),
+            "wind_speed_10m": float(current.Variables(5).Value()),
+            "wind_direction_10m": float(current.Variables(6).Value())
+        }
+    }
+    return json.dumps(result, cls=DateTimeEncoder)
+
+
+# ============================================================
+# TOOL 3: Temperature Forecast (hourly at 2m, 80m, 120m, 180m + apparent)
+# ============================================================
+
+@mcp.tool
+def get_temperature_forecast(
     latitude: float,
     longitude: float,
     forecast_days: int = 7
 ) -> str:
     """
-    Retrieve an agricultural weather forecast and assessment report for given coordinates.
+    Get hourly temperature forecast at multiple heights (2m, 80m, 120m, 180m) and apparent (feels-like) temperature.
 
     Args:
         latitude (float): Latitude of the target location.
@@ -242,367 +378,474 @@ def get_weather_forecast(
         forecast_days (int): Number of days to forecast (1 to 14, default is 7).
     """
     if forecast_days < 1 or forecast_days > 14:
-        return "Error: forecast_days must be between 1 and 14."
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
 
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "hourly": [
-            "temperature_2m",
-            "relative_humidity_2m",
-            "precipitation",
-            "wind_speed_10m",
-            "wind_direction_10m",
-            "soil_temperature_0_to_10cm",
-            "soil_moisture_0_to_10cm",
-            "evapotranspiration"
-        ],
-        "timezone": "auto",
-        "forecast_days": forecast_days
-    }
-
-    logger.info(f"Querying weather forecast for coordinates: ({latitude}, {longitude}) for {forecast_days} days...")
+    variables = ["temperature_2m", "apparent_temperature", "temperature_80m", "temperature_120m", "temperature_180m"]
     try:
-        responses = openmeteo.weather_api(url, params=params)
-        response = responses[0]
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
     except Exception as e:
-        logger.error(f"Open-Meteo API query failed: {str(e)}")
-        return f"Error: Failed to fetch weather data from Open-Meteo API: {str(e)}"
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
 
-    # Process hourly data
-    hourly = response.Hourly()
-    utc_offset = response.UtcOffsetSeconds()
-    
-    try:
-        # Load hourly variables as numpy arrays
-        hourly_data = {
-            "date": pd.date_range(
-                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-                freq=pd.Timedelta(seconds=hourly.Interval()),
-                inclusive="left"
-            ),
-            "temp": hourly.Variables(0).ValuesAsNumpy(),
-            "humidity": hourly.Variables(1).ValuesAsNumpy(),
-            "precipitation": hourly.Variables(2).ValuesAsNumpy(),
-            "wind_speed": hourly.Variables(3).ValuesAsNumpy(),
-            "wind_dir": hourly.Variables(4).ValuesAsNumpy(),
-            "soil_temp": hourly.Variables(5).ValuesAsNumpy(),
-            "soil_moisture": hourly.Variables(6).ValuesAsNumpy(),
-            "evapotranspiration": hourly.Variables(7).ValuesAsNumpy(),
-        }
-        
-        df = pd.DataFrame(data=hourly_data)
-        # Shift to local timezone
-        df["date_local"] = df["date"] + pd.to_timedelta(utc_offset, unit="s")
-    except Exception as e:
-        logger.error(f"Error compiling pandas data: {str(e)}")
-        return f"Error: Failed to process weather data: {str(e)}"
+    return _format_result(data["location"], "temperature_hourly", data["df"])
 
-    # Perform Agricultural Assessments
-    # Calculate general risk indices
-    high_humidity_streak = 0
-    max_humidity_streak = 0
-    for h in df["humidity"]:
-        if h > 85:
-            high_humidity_streak += 1
-            max_humidity_streak = max(max_humidity_streak, high_humidity_streak)
-        else:
-            high_humidity_streak = 0
-            
-    # Spraying suitability ratio (hours with 5 <= wind <= 15)
-    total_hours = len(df)
-    optimal_spray_hours = len(df[(df["wind_speed"] >= 5) & (df["wind_speed"] <= 15)])
-    spray_ratio = (optimal_spray_hours / total_hours) * 100
-    
-    # Soil conditions
-    avg_soil_temp = df["soil_temp"].mean()
-    avg_soil_moist = df["soil_moisture"].mean()
-    
-    # We will resample/group by day based on local date
-    df["day"] = df["date_local"].dt.date
-    
-    # Daily aggregation
-    daily_agg = df.groupby("day").agg(
-        temp_max=("temp", "max"),
-        temp_min=("temp", "min"),
-        humidity_avg=("humidity", "mean"),
-        precip_sum=("precipitation", "sum"),
-        wind_max=("wind_speed", "max"),
-        soil_temp_avg=("soil_temp", "mean"),
-        soil_moist_avg=("soil_moisture", "mean"),
-        et_sum=("evapotranspiration", "sum")
-    ).reset_index()
-    
-    output = []
-    output.append(f"# AgroConnectMCP Agricultural Weather Report\n")
-    output.append(f"- **Coordinates**: {response.Latitude():.4f}°N, {response.Longitude():.4f}°E")
-    output.append(f"- **Elevation**: {response.Elevation()} m above sea level")
-    output.append(f"- **Timezone Offset**: {utc_offset / 3600:+.1f} hours from UTC")
-    output.append(f"- **Forecast Period**: {forecast_days} days\n")
-    
-    # Risk summary card
-    output.append("## 🌾 Agricultural Advisory Summary\n")
-    
-    # Disease risk advisory
-    if max_humidity_streak >= 8:
-        output.append("> [!WARNING]")
-        output.append(f"> **High Fungal Disease Risk**: Sustained relative humidity (>85%) detected for up to {max_humidity_streak} consecutive hours. Favorable conditions for pathogens like Early Blight or powdery mildew. Consider proactive crop health treatments.")
-    else:
-        output.append("> [!NOTE]")
-        output.append(f"> **Low Fungal Disease Risk**: Relative humidity levels are not sustained at extreme levels. Standard preventative measures are sufficient.")
 
-    # Spraying advisory
-    if spray_ratio > 60:
-        output.append("> [!TIP]")
-        output.append(f"> **Excellent Spraying Conditions**: {spray_ratio:.1f}% of forecast hours have optimal wind speeds (5-15 km/h). Safe for pesticide/herbicide application with minimal drift risk.")
-    elif spray_ratio > 30:
-        output.append("> [!IMPORTANT]")
-        output.append(f"> **Moderate Spraying Conditions**: {spray_ratio:.1f}% of forecast hours are optimal. Check hourly forecast tables to target low-drift windows (avoid calm inversion periods and high winds).")
-    else:
-        output.append("> [!CAUTION]")
-        output.append(f"> **Poor Spraying Conditions**: Only {spray_ratio:.1f}% of forecast hours are optimal. High wind speeds or prolonged calm spells (inversion risk) make spraying hazardous. Postpone chemical treatment if possible.")
-
-    # Soil advisory
-    if avg_soil_temp < 10.0:
-        output.append("> [!WARNING]")
-        output.append(f"> **Low Soil Temperature**: Average soil temperature is {avg_soil_temp:.1f}°C. Too cold for seed germination of warm-season crops (e.g., tomatoes, corn). Delay planting to avoid seed rot.")
-    elif avg_soil_moist < 0.15:
-        output.append("> [!IMPORTANT]")
-        output.append(f"> **Dry Soil Warning**: Average soil moisture is low ({avg_soil_moist:.3f} m³/m³). Crops may experience drought stress. Irrigation is recommended.")
-    elif avg_soil_moist > 0.45:
-        output.append("> [!WARNING]")
-        output.append(f"> **Waterlogged Soil**: Average soil moisture is very high ({avg_soil_moist:.3f} m³/m³). Risk of root rot and oxygen depletion in the root zone. Ensure adequate field drainage.")
-    else:
-        output.append("> [!TIP]")
-        output.append(f"> **Optimal Soil Conditions**: Average soil temperature is {avg_soil_temp:.1f}°C and moisture is {avg_soil_moist:.3f} m³/m³. Highly favorable for root development and germination.")
-        
-    output.append("")
-
-    # Daily Summary Table
-    output.append("## 📅 Daily Agricultural Forecast Summary\n")
-    output.append("| Date | Temp Max/Min (°C) | Avg RH (%) | Precip (mm) | Max Wind (km/h) | Avg Soil Temp (°C) | Avg Soil Moist (m³/m³) | Total ET (mm) |")
-    output.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
-    for _, row in daily_agg.iterrows():
-        date_str = row['day'].strftime('%Y-%m-%d')
-        output.append(
-            f"| {date_str} "
-            f"| {row['temp_max']:.1f}° / {row['temp_min']:.1f}° "
-            f"| {row['humidity_avg']:.1f}% "
-            f"| {row['precip_sum']:.1f} "
-            f"| {row['wind_max']:.1f} "
-            f"| {row['soil_temp_avg']:.1f}° "
-            f"| {row['soil_moist_avg']:.3f} "
-            f"| {row['et_sum']:.2f} |"
-        )
-    output.append("")
-
-    # Hourly Details for first 24 hours
-    output.append("## 🕐 24-Hour Detailed Agricultural Outlook\n")
-    output.append("| Time | Temp (°C) | RH (%) | Wind (km/h) | Soil Temp (°C) | Soil Moist (m³/m³) | Spraying Suitability |")
-    output.append("| --- | --- | --- | --- | --- | --- | --- |")
-    
-    # Slice the first 24 hours
-    df_24h = df.head(24)
-    for _, row in df_24h.iterrows():
-        time_str = row['date_local'].strftime('%H:%M')
-        
-        # Spraying suitability tag
-        w = row['wind_speed']
-        if w < 5.0:
-            suitability = "⚠️ Calm (Inversion)"
-        elif w <= 15.0:
-            suitability = "✅ Optimal"
-        else:
-            suitability = "❌ High Wind (Drift)"
-            
-        output.append(
-            f"| {time_str} "
-            f"| {row['temp']:.1f}° "
-            f"| {row['humidity']:.0f}% "
-            f"| {row['wind_speed']:.1f} "
-            f"| {row['soil_temp']:.1f}° "
-            f"| {row['soil_moisture']:.3f} "
-            f"| {suitability} |"
-        )
-    
-    output.append("")
-    return "\n".join(output)
+# ============================================================
+# TOOL 4: Humidity Forecast (relative humidity, dew point, vapour pressure deficit)
+# ============================================================
 
 @mcp.tool
-def get_soil_conditions(
+def get_humidity_forecast(
     latitude: float,
     longitude: float,
-    days: int = 3
+    forecast_days: int = 7
 ) -> str:
     """
-    Retrieve a comprehensive soil condition analysis at multiple depths (0-7cm, 7-28cm, 28-100cm, 100-255cm).
+    Get hourly humidity forecast including relative humidity, dew point, and vapour pressure deficit.
 
     Args:
         latitude (float): Latitude of the target location.
         longitude (float): Longitude of the target location.
-        days (int): Number of days to analyze (1 to 14, default is 3).
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
     """
-    if days < 1 or days > 14:
-        return "Error: days must be between 1 and 14."
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
 
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "hourly": [
-            "soil_temperature_0_to_7cm",
-            "soil_temperature_7_to_28cm",
-            "soil_temperature_28_to_100cm",
-            "soil_temperature_100_to_255cm",
-            "soil_moisture_0_to_7cm",
-            "soil_moisture_7_to_28cm",
-            "soil_moisture_28_to_100cm",
-            "soil_moisture_100_to_255cm"
-        ],
-        "timezone": "auto",
-        "forecast_days": days
-    }
-
-    logger.info(f"Querying soil conditions for coordinates: ({latitude}, {longitude}) for {days} days...")
+    variables = ["relative_humidity_2m", "dew_point_2m", "vapour_pressure_deficit"]
     try:
-        responses = openmeteo.weather_api(url, params=params)
-        response = responses[0]
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
     except Exception as e:
-        logger.error(f"Open-Meteo API query for soil failed: {str(e)}")
-        return f"Error: Failed to fetch soil data from Open-Meteo API: {str(e)}"
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
 
-    hourly = response.Hourly()
-    utc_offset = response.UtcOffsetSeconds()
+    return _format_result(data["location"], "humidity_hourly", data["df"])
 
+
+# ============================================================
+# TOOL 5: Precipitation Forecast (probability, amount, rain, showers, snowfall, snow depth)
+# ============================================================
+
+@mcp.tool
+def get_precipitation_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly precipitation forecast including probability, total precipitation, rain, showers, snowfall, and snow depth.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["precipitation_probability", "precipitation", "rain", "showers", "snowfall", "snow_depth"]
     try:
-        hourly_data = {
-            "date": pd.date_range(
-                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-                freq=pd.Timedelta(seconds=hourly.Interval()),
-                inclusive="left"
-            ),
-            "soil_temp_1": hourly.Variables(0).ValuesAsNumpy(),
-            "soil_temp_2": hourly.Variables(1).ValuesAsNumpy(),
-            "soil_temp_3": hourly.Variables(2).ValuesAsNumpy(),
-            "soil_temp_4": hourly.Variables(3).ValuesAsNumpy(),
-            "soil_moist_1": hourly.Variables(4).ValuesAsNumpy(),
-            "soil_moist_2": hourly.Variables(5).ValuesAsNumpy(),
-            "soil_moist_3": hourly.Variables(6).ValuesAsNumpy(),
-            "soil_moist_4": hourly.Variables(7).ValuesAsNumpy(),
-        }
-        df = pd.DataFrame(data=hourly_data)
-        df["date_local"] = df["date"] + pd.to_timedelta(utc_offset, unit="s")
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
     except Exception as e:
-        logger.error(f"Error compiling soil pandas data: {str(e)}")
-        return f"Error: Failed to process soil data: {str(e)}"
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
 
-    df["day"] = df["date_local"].dt.date
-    daily_agg = df.groupby("day").agg(
-        t1=("soil_temp_1", "mean"),
-        t2=("soil_temp_2", "mean"),
-        t3=("soil_temp_3", "mean"),
-        t4=("soil_temp_4", "mean"),
-        m1=("soil_moist_1", "mean"),
-        m2=("soil_moist_2", "mean"),
-        m3=("soil_moist_3", "mean"),
-        m4=("soil_moist_4", "mean"),
-    ).reset_index()
+    return _format_result(data["location"], "precipitation_hourly", data["df"])
 
-    # Calculate overall averages
-    avg_t1 = df["soil_temp_1"].mean()
-    avg_t2 = df["soil_temp_2"].mean()
-    avg_t3 = df["soil_temp_3"].mean()
-    avg_t4 = df["soil_temp_4"].mean()
-    avg_m1 = df["soil_moist_1"].mean()
-    avg_m2 = df["soil_moist_2"].mean()
-    avg_m3 = df["soil_moist_3"].mean()
-    avg_m4 = df["soil_moist_4"].mean()
 
-    output = []
-    output.append(f"# AgroConnectMCP Soil Condition Report\n")
-    output.append(f"- **Coordinates**: {response.Latitude():.4f}°N, {response.Longitude():.4f}°E")
-    output.append(f"- **Elevation**: {response.Elevation()} m above sea level")
-    output.append(f"- **Analysis Period**: {days} days ({daily_agg['day'].iloc[0]} to {daily_agg['day'].iloc[-1]})\n")
+# ============================================================
+# TOOL 6: Wind Forecast (speed at 10m/80m/120m/180m, direction at all heights, gusts)
+# ============================================================
 
-    # Deep vertical profiles advisories
-    output.append("## 🪴 Root Zone Agricultural Advisories\n")
+@mcp.tool
+def get_wind_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly wind forecast including speed at 10m/80m/120m/180m, direction at all heights, and wind gusts.
 
-    # 1. Surface Zone (0-7cm) - Germination suitability
-    output.append("### 🟫 Surface Zone (0-7 cm)")
-    output.append("   *Crucial for seed sowing, germination, and shallow-root crops (e.g., lettuce, onions).*")
-    if avg_t1 < 10.0:
-        output.append(f"> [!WARNING]\n> **Cold Surface Soil**: Average temperature is {avg_t1:.1f}°C. Warm-season seeds will rot or remain dormant. Delay sowing until soil temperatures exceed 10-15°C.")
-    elif avg_t1 < 15.0:
-        output.append(f"> [!IMPORTANT]\n> **Cool Surface Soil**: Average temperature is {avg_t1:.1f}°C. Cool-season crops (e.g. peas, spinach) can germinate, but warm-season crops will have delayed emergence.")
-    else:
-        output.append(f"> [!TIP]\n> **Warm Surface Soil**: Average temperature is {avg_t1:.1f}°C. Favorable for swift germination of most warm-season crops (tomatoes, squash, corn).")
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
 
-    if avg_m1 < 0.15:
-        output.append(f"> [!CAUTION]\n> **Dry Surface**: Moisture level is low ({avg_m1:.3f} m³/m³). Seeds will fail to imbibe water and germinate. Immediate irrigation is necessary after planting.")
-    elif avg_m1 > 0.45:
-        output.append(f"> [!WARNING]\n> **Waterlogged Surface**: Moisture is extremely high ({avg_m1:.3f} m³/m³). High risk of seed decay, damping-off fungus, and compaction. Avoid field traffic.")
-    else:
-        output.append(f"> [!TIP]\n> **Optimal Surface Moisture**: Moisture level is ideal ({avg_m1:.3f} m³/m³). Highly favorable for root emergence.")
+    variables = [
+        "wind_speed_10m", "wind_speed_80m", "wind_speed_120m", "wind_speed_180m",
+        "wind_direction_10m", "wind_direction_80m", "wind_direction_120m", "wind_direction_180m",
+        "wind_gusts_10m"
+    ]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
 
-    # 2. Medium Root Zone (7-28 cm) - Active plant growth
-    output.append("\n### 🥕 Active Root Zone (7-28 cm)")
-    output.append("   *Primary absorption zone for mature vegetable roots, grains, and small shrubs.*")
-    if avg_m2 < 0.15:
-        output.append(f"> [!WARNING]\n> **Active Root Drought**: Volumetric soil moisture at 7-28 cm is {avg_m2:.3f} m³/m³. The plants' active root zone is entering drought stress, which will lead to wilting and reduced yield. Deep irrigation is highly recommended.")
-    elif avg_m2 > 0.45:
-        output.append(f"> [!CAUTION]\n> **Saturated Subsurface**: Subsurface moisture is {avg_m2:.3f} m³/m³. Soil pores are saturated, causing lack of oxygen (anoxia) to plant roots. Root death and nutrient uptake blockages may occur.")
-    else:
-        output.append(f"> [!TIP]\n> **Healthy Subsurface Moisture**: Moisture level is healthy ({avg_m2:.3f} m³/m³). Promotes healthy crop growth and strong transpiration.")
+    return _format_result(data["location"], "wind_hourly", data["df"])
 
-    # 3. Deep Root Zone (28-100 cm)
-    output.append("\n### 🌳 Deep Root Zone (28-100 cm)")
-    output.append("   *Key water source for deep-rooted crops, grapevines, and fruit trees.*")
-    if avg_m3 < 0.15:
-        output.append(f"> [!IMPORTANT]\n> **Deep Soil Dryness**: Moisture is low ({avg_m3:.3f} m³/m³). Deep root systems and orchards are exhausting their reserve moisture. Deep-soak irrigation may be necessary.")
-    else:
-        output.append(f"> [!TIP]\n> **Stable Deep Moisture**: Moisture is stable ({avg_m3:.3f} m³/m³). Provides a resilient reserve buffer against dry hot spells.")
 
-    output.append("")
+# ============================================================
+# TOOL 7: Pressure Forecast (mean sea level pressure, surface pressure)
+# ============================================================
 
-    # Vertical Profile Table
-    output.append("## 📊 Soil Depth Profile Statistics (Average over period)\n")
-    output.append("| Layer Depth | Average Temperature (°C) | Average Volumetric Moisture (m³/m³) | Suitability Status |")
-    output.append("| --- | --- | --- | --- |")
-    
-    def get_status(temp, moist):
-        if moist < 0.15:
-            return "🔴 Dry (Drought)"
-        elif moist > 0.45:
-            return "🔵 Saturated (Anoxic)"
-        elif temp < 10.0:
-            return "🟡 Cold"
-        else:
-            return "🟢 Ideal"
+@mcp.tool
+def get_pressure_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly atmospheric pressure forecast including mean sea level pressure and surface pressure.
 
-    output.append(f"| Level 1: 0 - 7 cm | {avg_t1:.1f}°C | {avg_m1:.3f} m³/m³ | {get_status(avg_t1, avg_m1)} |")
-    output.append(f"| Level 2: 7 - 28 cm | {avg_t2:.1f}°C | {avg_m2:.3f} m³/m³ | {get_status(avg_t2, avg_m2)} |")
-    output.append(f"| Level 3: 28 - 100 cm | {avg_t3:.1f}°C | {avg_m3:.3f} m³/m³ | {get_status(avg_t3, avg_m3)} |")
-    output.append(f"| Level 4: 100 - 255 cm | {avg_t4:.1f}°C | {avg_m4:.3f} m³/m³ | {get_status(avg_t4, avg_m4)} |")
-    output.append("")
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
 
-    # Daily soil forecast table
-    output.append("## 📅 Daily Soil Profile Forecast\n")
-    output.append("| Date | Depth 0-7cm (T / M) | Depth 7-28cm (T / M) | Depth 28-100cm (T / M) | Depth 100-255cm (T / M) |")
-    output.append("| --- | --- | --- | --- | --- |")
-    for _, row in daily_agg.iterrows():
-        date_str = row['day'].strftime('%Y-%m-%d')
-        output.append(
-            f"| {date_str} "
-            f"| {row['t1']:.1f}°C / {row['m1']:.3f} "
-            f"| {row['t2']:.1f}°C / {row['m2']:.3f} "
-            f"| {row['t3']:.1f}°C / {row['m3']:.3f} "
-            f"| {row['t4']:.1f}°C / {row['m4']:.3f} |"
-        )
-    output.append("")
-    return "\n".join(output)
+    variables = ["pressure_msl", "surface_pressure"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "pressure_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 8: Cloud Cover Forecast (total, low, mid, high)
+# ============================================================
+
+@mcp.tool
+def get_cloud_cover_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly cloud cover forecast at all altitude layers (total, low, mid, high).
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["cloud_cover", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "cloud_cover_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 9: Visibility Forecast
+# ============================================================
+
+@mcp.tool
+def get_visibility_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly visibility forecast in meters.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["visibility"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "visibility_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 10: Evapotranspiration Forecast (ET and ET0 FAO reference)
+# ============================================================
+
+@mcp.tool
+def get_evapotranspiration_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly evapotranspiration forecast including actual evapotranspiration and ET0 FAO reference evapotranspiration.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["evapotranspiration", "et0_fao_evapotranspiration"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "evapotranspiration_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 11: Weather Code Forecast
+# ============================================================
+
+@mcp.tool
+def get_weather_code_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly WMO weather interpretation codes. Codes indicate conditions like clear sky (0), fog (45/48), drizzle (51-57), rain (61-67), snow (71-77), thunderstorm (95-99), etc.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["weather_code"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "weather_code_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 12: UV Index Forecast (daily max)
+# ============================================================
+
+@mcp.tool
+def get_uv_index_forecast(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get daily maximum UV index forecast.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["uv_index_max"]
+    try:
+        data = _query_daily(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "uv_index_daily", data["df"])
+
+
+# ============================================================
+# TOOL 13: Sunrise & Sunset Times (daily)
+# ============================================================
+
+@mcp.tool
+def get_sunrise_sunset(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get daily sunrise and sunset times.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["sunrise", "sunset"]
+    try:
+        data = _query_daily(latitude, longitude, variables, forecast_days, int64_vars=["sunrise", "sunset"])
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "sunrise_sunset_daily", data["df"])
+
+
+# ============================================================
+# TOOL 14: Daily Temperature Forecast (max & min)
+# ============================================================
+
+@mcp.tool
+def get_daily_temperature(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get daily maximum and minimum temperature forecast.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["temperature_2m_max", "temperature_2m_min"]
+    try:
+        data = _query_daily(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "temperature_daily", data["df"])
+
+
+# ============================================================
+# TOOL 15: Daily Rain Forecast (rain sum)
+# ============================================================
+
+@mcp.tool
+def get_daily_rain(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get daily total rainfall sum forecast.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["rain_sum"]
+    try:
+        data = _query_daily(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "rain_daily", data["df"])
+
+
+# ============================================================
+# TOOL 16: Daily Wind Forecast (max speed & max gusts)
+# ============================================================
+
+@mcp.tool
+def get_daily_wind(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get daily maximum wind speed and maximum wind gusts forecast.
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["wind_speed_10m_max", "wind_gusts_10m_max"]
+    try:
+        data = _query_daily(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "wind_daily", data["df"])
+
+
+# ============================================================
+# TOOL 17: Soil Temperature Forecast (0cm, 6cm, 18cm, 54cm)
+# ============================================================
+
+@mcp.tool
+def get_soil_temperature(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly soil temperature forecast at multiple depths (0cm, 6cm, 18cm, 54cm).
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["soil_temperature_0cm", "soil_temperature_6cm", "soil_temperature_18cm", "soil_temperature_54cm"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "soil_temperature_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 18: Soil Moisture Forecast (0-1cm, 1-3cm, 3-9cm, 9-27cm)
+# ============================================================
+
+@mcp.tool
+def get_soil_moisture(
+    latitude: float,
+    longitude: float,
+    forecast_days: int = 7
+) -> str:
+    """
+    Get hourly soil moisture forecast at multiple depths (0-1cm, 1-3cm, 3-9cm, 9-27cm).
+
+    Args:
+        latitude (float): Latitude of the target location.
+        longitude (float): Longitude of the target location.
+        forecast_days (int): Number of days to forecast (1 to 14, default is 7).
+    """
+    if forecast_days < 1 or forecast_days > 14:
+        return json.dumps({"error": "forecast_days must be between 1 and 14."})
+
+    variables = ["soil_moisture_0_to_1cm", "soil_moisture_1_to_3cm", "soil_moisture_3_to_9cm", "soil_moisture_9_to_27cm"]
+    try:
+        data = _query_hourly(latitude, longitude, variables, forecast_days)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch data: {str(e)}"})
+
+    return _format_result(data["location"], "soil_moisture_hourly", data["df"])
+
+
+# ============================================================
+# TOOL 19: Historical Weather
+# ============================================================
 
 @mcp.tool
 def get_historical_weather(
@@ -612,7 +855,7 @@ def get_historical_weather(
     end_date: str
 ) -> str:
     """
-    Retrieve historical weather data and agricultural summary statistics for a past timeframe.
+    Retrieve historical weather data for a past timeframe including daily max/min temperature, precipitation, and wind speed.
 
     Args:
         latitude (float): Latitude of the target location.
@@ -620,21 +863,14 @@ def get_historical_weather(
         start_date (str): Start date of the range (YYYY-MM-DD).
         end_date (str): End date of the range (YYYY-MM-DD).
     """
-    # Simple date format validation
-    import datetime
     try:
         start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
         end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
     except ValueError:
-        return "Error: Invalid date format. Please use YYYY-MM-DD (e.g. '2025-05-01')."
+        return json.dumps({"error": "Invalid date format. Please use YYYY-MM-DD (e.g. '2025-05-01')."})
 
     if start_dt > end_dt:
-        return "Error: start_date must be before or equal to end_date."
-        
-    # Open-Meteo archive starts from 1940 but typically ends 2-3 days ago
-    today = datetime.date.today()
-    if end_dt >= today - datetime.timedelta(days=1):
-        return f"Error: Historical archive data is typically available up to 2 days ago. Please select an end_date prior to {today - datetime.timedelta(days=1)}."
+        return json.dumps({"error": "start_date must be before or equal to end_date."})
 
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
@@ -642,12 +878,7 @@ def get_historical_weather(
         "longitude": longitude,
         "start_date": start_date,
         "end_date": end_date,
-        "daily": [
-            "temperature_2m_max",
-            "temperature_2m_min",
-            "precipitation_sum",
-            "wind_speed_10m_max"
-        ],
+        "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"],
         "timezone": "auto"
     }
 
@@ -656,99 +887,37 @@ def get_historical_weather(
         responses = openmeteo.weather_api(url, params=params)
         response = responses[0]
     except Exception as e:
-        logger.error(f"Open-Meteo Historical API query failed: {str(e)}")
-        return f"Error: Failed to fetch historical data from Open-Meteo API: {str(e)}"
+        return json.dumps({"error": f"Failed to fetch historical data: {str(e)}"})
 
     daily = response.Daily()
-    utc_offset = response.UtcOffsetSeconds()
-
-    try:
-        daily_data = {
-            "date": pd.date_range(
-                start=pd.to_datetime(daily.Time(), unit="s", utc=True),
-                end=pd.to_datetime(daily.TimeEnd(), unit="s", utc=True),
-                freq=pd.Timedelta(seconds=daily.Interval()),
-                inclusive="left"
-            ),
-            "temp_max": daily.Variables(0).ValuesAsNumpy(),
-            "temp_min": daily.Variables(1).ValuesAsNumpy(),
-            "precipitation": daily.Variables(2).ValuesAsNumpy(),
-            "wind_max": daily.Variables(3).ValuesAsNumpy()
-        }
-        df = pd.DataFrame(data=daily_data)
-        # Shift timezone
-        df["date_local"] = df["date"] + pd.to_timedelta(utc_offset, unit="s")
-        df["date_str"] = df["date_local"].dt.strftime('%Y-%m-%d')
-    except Exception as e:
-        logger.error(f"Error compiling historical pandas data: {str(e)}")
-        return f"Error: Failed to process historical data: {str(e)}"
-
-    # Metrics calculation
-    total_precip = df["precipitation"].sum()
-    avg_max_temp = df["temp_max"].mean()
-    avg_min_temp = df["temp_min"].mean()
-    absolute_max = df["temp_max"].max()
-    absolute_min = df["temp_min"].min()
-    
-    # Frost days (min temp < 0)
-    frost_days = len(df[df["temp_min"] < 0])
-    
-    # Heat stress days (max temp > 30)
-    heat_days = len(df[df["temp_max"] > 30])
-    
-    output = []
-    output.append(f"# AgroConnectMCP Historical Weather Assessment Report\n")
-    output.append(f"- **Coordinates**: {response.Latitude():.4f}°N, {response.Longitude():.4f}°E")
-    output.append(f"- **Elevation**: {response.Elevation()} m above sea level")
-    output.append(f"- **Historical Range**: {start_date} to {end_date} ({len(df)} days)\n")
-
-    output.append("## 📊 Historical Agriculture Metrics Summary\n")
-    
-    # Cumulative Rainfall Alert
-    if total_precip == 0:
-        output.append("> [!WARNING]")
-        output.append(f"> **Zero Rain Recorded**: No precipitation occurred during this {len(df)}-day window. Extreme drought pressure could have occurred without irrigation.")
-    elif total_precip < len(df) * 1.0: # less than 1mm/day average
-        output.append("> [!IMPORTANT]")
-        output.append(f"> **Low Rainfall**: Cumulative precipitation was {total_precip:.1f} mm. Sub-optimal water input from natural rainfall.")
-    else:
-        output.append("> [!TIP]")
-        output.append(f"> **Adequate Moisture**: Cumulative precipitation was {total_precip:.1f} mm. Favorable water replenishment for field soils.")
-
-    # Extreme Temperatures
-    if frost_days > 0:
-        output.append("> [!CAUTION]")
-        output.append(f"> **Frost Damage Risk**: {frost_days} frost days (Temp < 0°C) were recorded, with a minimum low of {absolute_min:.1f}°C. Severe threat to budding orchards, tender shoots, and young crops.")
-        
-    if heat_days > 0:
-        output.append("> [!WARNING]")
-        output.append(f"> **Heat Stress Stressors**: {heat_days} days exceeding 30.0°C were recorded, peaking at {absolute_max:.1f}°C. High crop transpiration and potential flower abortion in sensitive crops.")
-
-    output.append(f"\n### Climatological Summary Stat Cards")
-    output.append(f"- **Cumulative Rainfall**: {total_precip:.1f} mm")
-    output.append(f"- **Mean Max Temp**: {avg_max_temp:.1f}°C (Peak: {absolute_max:.1f}°C)")
-    output.append(f"- **Mean Min Temp**: {avg_min_temp:.1f}°C (Low: {absolute_min:.1f}°C)")
-    output.append(f"- **Frost Days (<0°C)**: {frost_days}")
-    output.append(f"- **Heat Stress Days (>30°C)**: {heat_days}")
-    output.append("")
-
-    # Daily weather log table
-    output.append("## 📅 Daily Historical Weather Log\n")
-    output.append("| Date | Max Temp (°C) | Min Temp (°C) | Precipitation (mm) | Max Wind (km/h) |")
-    output.append("| --- | --- | --- | --- | --- |")
-    for _, row in df.iterrows():
-        output.append(
-            f"| {row['date_str']} "
-            f"| {row['temp_max']:.1f}°C "
-            f"| {row['temp_min']:.1f}°C "
-            f"| {row['precipitation']:.1f} "
-            f"| {row['wind_max']:.1f} |"
+    daily_data = {
+        "date": pd.date_range(
+            start=pd.to_datetime(daily.Time(), unit="s", utc=True),
+            end=pd.to_datetime(daily.TimeEnd(), unit="s", utc=True),
+            freq=pd.Timedelta(seconds=daily.Interval()),
+            inclusive="left"
         )
-    output.append("")
-    return "\n".join(output)
+    }
+    for idx, var_name in enumerate(params["daily"]):
+        daily_data[var_name] = daily.Variables(idx).ValuesAsNumpy()
+
+    df = pd.DataFrame(data=daily_data)
+    result = {
+        "location": {
+            "latitude": float(response.Latitude()),
+            "longitude": float(response.Longitude()),
+            "elevation": float(response.Elevation()),
+            "utc_offset_seconds": int(response.UtcOffsetSeconds())
+        },
+        "historical_daily": json.loads(df.to_json(orient="records", date_format="iso"))
+    }
+    return json.dumps(result, cls=DateTimeEncoder)
+
+
+# ============================================================
+# SERVER ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     logger.info("Starting AgroConnectMCP Server...")
     mcp.run()
-
-
