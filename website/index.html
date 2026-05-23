@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgroConnectMCP | Agricultural Intelligence for LLMs</title>
+    <meta name="description"
+        content="AgroConnectMCP is a production-ready Model Context Protocol (MCP) server providing crop disease diagnosis, weather forecasting, and agricultural market news to LLMs.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Background Elements -->
+    <div class="bg-shape shape-1"></div>
+    <div class="bg-shape shape-2"></div>
+    <div class="bg-noise"></div>
+
+    <header class="hero">
+        <div class="container animate-up">
+            <div class="badge">Version 1.0.0</div>
+            <h1 class="hero-title">AgroConnect<span>MCP</span></h1>
+            <p class="hero-subtitle">Advanced Agricultural Intelligence for Large Language Models</p>
+            <p class="hero-description">A production-ready Model Context Protocol (MCP) server designed to empower AI
+                with tools for crop disease diagnosis, precise weather forecasting, crop & fertilizer recommendations,
+                and real-time agricultural market news.</p>
+            <div class="hero-cta">
+                <a href="#installation" class="btn btn-primary">Get Started</a>
+                <a href="#features" class="btn btn-secondary">Explore Features</a>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section id="features" class="section">
+            <div class="container">
+                <div class="section-header animate-up">
+                    <h2>Powerful Agricultural Features</h2>
+                    <p>AgroConnectMCP exposes a rich set of capabilities via the Model Context Protocol to enhance
+                        farming decisions.</p>
+                </div>
+                <div class="grid features-grid">
+                    <div class="card glass animate-up delay-1">
+                        <div class="card-icon">🌿</div>
+                        <h3>Plant Disease Diagnosis</h3>
+                        <p>Identifies plant diseases and pests from images (URL, local path, or base64) and provides
+                            detailed treatment suggestions.</p>
+                    </div>
+                    <div class="card glass animate-up delay-2">
+                        <div class="card-icon">🌾</div>
+                        <h3>Crop Recommendation</h3>
+                        <p>Recommends optimal crops based on soil nutrients (N, P, K) and environmental factors using a
+                            trained Random Forest model.</p>
+                    </div>
+                    <div class="card glass animate-up delay-3">
+                        <div class="card-icon">🧪</div>
+                        <h3>Fertilizer Recommendation</h3>
+                        <p>Suggests appropriate fertilizers based on soil conditions, crop type, environment, and
+                            existing nutrient levels.</p>
+                    </div>
+                    <div class="card glass animate-up delay-1">
+                        <div class="card-icon">🌤️</div>
+                        <h3>Weather Intelligence</h3>
+                        <p>Comprehensive data including current conditions, 14-day forecasts, soil metrics,
+                            evapotranspiration, and UV Index.</p>
+                    </div>
+                    <div class="card glass animate-up delay-2">
+                        <div class="card-icon">🌊</div>
+                        <h3>River Discharge</h3>
+                        <p>Provides flood risk assessment data via river discharge forecasts powered by Open-Meteo.</p>
+                    </div>
+                    <div class="card glass animate-up delay-3">
+                        <div class="card-icon">📈</div>
+                        <h3>Market News</h3>
+                        <p>Fetches the latest region-specific agricultural market news and real-time crop price
+                            insights.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="prerequisites" class="section dark-section">
+            <div class="container">
+                <div class="grid layout-2-col align-center">
+                    <div class="content-block animate-up">
+                        <h2>Prerequisites & API Setup</h2>
+                        <ul class="check-list">
+                            <li>Python 3.12 or higher (if running locally)</li>
+                            <li>Docker (if running via container)</li>
+                            <li>Kindwise API Key for Crop Health features</li>
+                        </ul>
+                    </div>
+                    <div class="card glass highlight-card animate-up delay-2">
+                        <h3>Obtaining a Kindwise API Key</h3>
+                        <p>The plant disease diagnosis tool relies on the Kindwise Crop Health API.</p>
+                        <ol class="step-list">
+                            <li>Visit the Kindwise website: <a href="https://www.kindwise.com/crop-health"
+                                    target="_blank">kindwise.com/crop-health</a></li>
+                            <li>Sign up for an account and navigate to the API section.</li>
+                            <li>Generate a new API key for the Crop Health API.</li>
+                            <li>Keep this key secure. It will be passed as the <code>KINDWISE_API_KEY</code> environment
+                                variable.</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="installation" class="section">
+            <div class="container">
+                <div class="section-header animate-up">
+                    <h2>Installation & Usage</h2>
+                    <p>AgroConnectMCP can be run directly via Python or within a Docker container (recommended for
+                        production).</p>
+                </div>
+
+                <div class="tabs-container animate-up delay-1">
+                    <div class="tabs-header">
+                        <button class="tab-btn active" data-tab="docker">Docker (Production)</button>
+                        <button class="tab-btn" data-tab="python">Python (Local)</button>
+                    </div>
+
+                    <div class="tab-content active" id="docker">
+                        <div class="step-card">
+                            <div class="step-number">1</div>
+                            <div class="step-body">
+                                <h4>Build the Docker image</h4>
+                                <div class="code-block">
+                                    <button class="copy-btn">Copy</button>
+                                    <pre><code>docker build -t agroconnectmcp:1.0.0 .</code></pre>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="step-card">
+                            <div class="step-number">2</div>
+                            <div class="step-body">
+                                <h4>Run the container</h4>
+                                <p>Pass the API key as an environment variable. Runs in STDIO mode.</p>
+                                <div class="code-block">
+                                    <button class="copy-btn">Copy</button>
+                                    <pre><code>docker run -i --rm -e KINDWISE_API_KEY="your_api_key_here" agroconnectmcp:1.0.0</code></pre>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="step-card">
+                            <div class="step-number">3</div>
+                            <div class="step-body">
+                                <h4>Test with MCP Inspector</h4>
+                                <div class="code-block">
+                                    <button class="copy-btn">Copy</button>
+                                    <pre><code>npx @modelcontextprotocol/inspector docker run -i --rm -e KINDWISE_API_KEY="your_api_key_here" agroconnectmcp:1.0.0</code></pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tab-content" id="python">
+                        <div class="step-card">
+                            <div class="step-number">1</div>
+                            <div class="step-body">
+                                <h4>Clone and setup virtual environment</h4>
+                                <div class="code-block">
+                                    <button class="copy-btn">Copy</button>
+                                    <pre><code>git clone &lt;repository_url&gt;
+cd AgroConnectMCP
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</code></pre>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="step-card">
+                            <div class="step-number">2</div>
+                            <div class="step-body">
+                                <h4>Configure Environment</h4>
+                                <p>Create a <code>.env</code> file in the project root:</p>
+                                <div class="code-block">
+                                    <button class="copy-btn">Copy</button>
+                                    <pre><code>KINDWISE_API_KEY=your_actual_api_key_here</code></pre>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="step-card">
+                            <div class="step-number">3</div>
+                            <div class="step-body">
+                                <h4>Run and Test</h4>
+                                <p>Run normally or test with MCP Inspector:</p>
+                                <div class="code-block">
+                                    <button class="copy-btn">Copy</button>
+                                    <pre><code># Direct run
+python server.py
+
+# Test with inspector
+npx @modelcontextprotocol/inspector python server.py</code></pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="clients" class="section bg-light-glass">
+            <div class="container">
+                <div class="section-header animate-up">
+                    <h2>Configuring MCP Clients</h2>
+                    <p>Connect AgroConnectMCP to popular LLM clients like Claude Desktop or LM Studio.</p>
+                </div>
+
+                <div class="grid client-grid">
+                    <div class="card glass animate-up delay-1">
+                        <div class="client-logo">Claude</div>
+                        <h3>Claude Desktop</h3>
+                        <p class="config-path"><strong>macOS:</strong>
+                            <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br>
+                            <strong>Windows:</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code>
+                        </p>
+
+                        <div class="code-block small-code mt-4">
+                            <button class="copy-btn">Copy</button>
+                            <pre><code>{
+  "mcpServers": {
+    "AgroConnectMCP": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "KINDWISE_API_KEY=your_api_key",
+        "agroconnectmcp:1.0.0"
+      ]
+    }
+  }
+}</code></pre>
+                        </div>
+                    </div>
+
+                    <div class="card glass animate-up delay-2">
+                        <div class="client-logo">LM Studio</div>
+                        <h3>LM Studio</h3>
+                        <p class="config-path">Add via Developer UI or edit:<br>
+                            <code>~/.cache/lm-studio/mcp/mcp_config.json</code>
+                        </p>
+
+                        <div class="code-block small-code mt-4">
+                            <button class="copy-btn">Copy</button>
+                            <pre><code>{
+  "mcpServers": {
+    "AgroConnectMCP": {
+      "command": "/absolute/path/to/AgroConnectMCP/.venv/bin/python",
+      "args": ["/absolute/path/to/AgroConnectMCP/server.py"],
+      "env": {
+        "KINDWISE_API_KEY": "your_api_key"
+      }
+    }
+  }
+}</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container animate-up">
+                <div class="architecture-box glass">
+                    <h3>Architecture Details</h3>
+                    <ul class="check-list">
+                        <li><strong>Framework:</strong> Built using <code>FastMCP</code> for rapid and structured MCP
+                            server development.</li>
+                        <li><strong>Machine Learning:</strong> Utilizes serialized <code>scikit-learn</code> and
+                            <code>xgboost</code> models for local inference, ensuring fast responses.</li>
+                        <li><strong>External APIs:</strong> Integrates with Open-Meteo for comprehensive weather data
+                            and DuckDuckGo for market news.</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container text-center">
+            <p>AgroConnectMCP v1.0.0 | Advanced Agricultural Intelligence</p>
+            <p class="footer-sub">For issues, feature requests, or contributions, please refer to the project's issue
+                tracker.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
