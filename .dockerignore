@@ -1,0 +1,33 @@
+# Virtual environments
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Git
+.git/
+.gitignore
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache*
+
+# Misc
+*.md
+pyproject.toml
+uv.lock
+Dockerfile
+.dockerignore
