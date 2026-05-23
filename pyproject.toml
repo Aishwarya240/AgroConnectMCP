@@ -13,5 +13,9 @@ dependencies = [
     "requests-cache>=1.2.0",
     "retry-requests>=2.0.0",
     "ddgs>=7.0.0",
+    "joblib>=1.4.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.4.0",
+    "xgboost>=2.0.0",
 ]
 

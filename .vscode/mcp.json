@@ -1,0 +1,10 @@
+{
+    "servers": {
+        "AgroConnectMCP": {
+            "type": "stdio",
+            "command": "/home/aishwarya/Downloads/AgroConnectMCP/.venv/bin/python",
+            "args": ["server.py"],
+            "cwd": "/home/aishwarya/Downloads/AgroConnectMCP"
+        }
+    }
+}
